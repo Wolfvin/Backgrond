@@ -7,9 +7,10 @@ Automatically loads token from ~/.zai-token (via z-auth.py)
 or from ZAI_TOKEN environment variable.
 
 Usage:
-  python3 z-chat.py                  # Interactive chat
-  python3 z-chat.py --model GLM-5   # Ganti model
-  python3 z-chat.py --new            # Mulai chat baru
+  python z-chat.py                  # Interactive chat
+  python z-chat.py --model GLM-5   # Ganti model
+  python z-chat.py --new            # Mulai chat baru
+  # Windows: py z-chat.py
 """
 
 import requests
@@ -18,9 +19,14 @@ import sys
 import uuid
 import time
 import os
+import platform
 import argparse
 from datetime import datetime
 from pathlib import Path
+
+
+def get_python_command() -> str:
+    return "py" if platform.system() == "Windows" else "python3"
 
 # ============================================================
 # Token Management
@@ -245,7 +251,7 @@ def main():
         print("❌ Token tidak ditemukan!")
         print()
         print("Cara ambil token:")
-        print("  1. Jalankan: python3 z-auth.py")
+        print(f"  1. Jalankan: {get_python_command()} z-auth.py")
         print("     (Buka Chrome, login, ambil token otomatis)")
         print()
         print("  2. Atau set manual:")
@@ -260,7 +266,7 @@ def main():
     print("🔐 Verifikasi token...")
     user_info = client.verify_auth()
     if not user_info:
-        print("❌ Token tidak valid! Jalankan ulang: python3 z-auth.py")
+        print(f"❌ Token tidak valid! Jalankan ulang: {get_python_command()} z-auth.py")
         sys.exit(1)
 
     print(f"✅ Login sebagai: {user_info.get('name', 'Unknown')} ({user_info.get('email', 'N/A')})")

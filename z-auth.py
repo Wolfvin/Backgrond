@@ -9,16 +9,17 @@ Cara kerja (prioritas):
 3. Navigasi ke chat.z.ai → Ambil JWT token → Simpan
 
 Usage:
-  python3 z-auth.py              # Ambil token (auto-detect Chrome)
-  python3 z-auth.py --show       # Tampilkan token tersimpan
-  python3 z-auth.py --force      # Force ambil token baru
-  python3 z-auth.py --launch     # Force launch Chrome baru (skip CDP)
-  python3 z-auth.py --debug-port 9222  # Port CDP khusus
+  python z-auth.py              # Ambil token (auto-detect Chrome)
+  python z-auth.py --show       # Tampilkan token tersimpan
+  python z-auth.py --force      # Force ambil token baru
+  python z-auth.py --launch     # Force launch Chrome baru (skip CDP)
+  python z-auth.py --debug-port 9222  # Port CDP khusus
+  # Windows: py z-auth.py
 
 Tips:
   Biar Chrome bisa di-connect, jalankan dengan flag:
   Windows:   chrome.exe --remote-debugging-port=9222
-  macOS:     /Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome --remote-debugging-port=9222
+  macOS:     /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --remote-debugging-port=9222
   Linux:     google-chrome --remote-debugging-port=9222
 """
 
@@ -29,10 +30,19 @@ import time
 import argparse
 import subprocess
 import platform
+import tempfile
 import urllib.request
 import urllib.error
 from pathlib import Path
 from typing import Optional
+
+
+def get_python_command() -> str:
+    return "py" if platform.system() == "Windows" else "python3"
+
+
+def get_default_debug_profile_dir() -> str:
+    return str(Path.home() / ".zai-debug-profile")
 
 
 # ============================================================
@@ -154,11 +164,11 @@ def launch_chrome_with_debug_port(
         print("❌ Chrome tidak ditemukan!")
         return False
 
-    cmd = [chrome_exe, f"--remote-debugging-port={port}"]
+    if not user_data_dir:
+        user_data_dir = get_default_debug_profile_dir()
 
-    if user_data_dir:
-        cmd.append(f"--user-data-dir={user_data_dir}")
-
+    cmd = [chrome_exe, f"--remote-debugging-port={port}", f"--user-data-dir={user_data_dir}"]
+    cmd.append("--new-window")
     cmd.append("--no-first-run")
     cmd.append("--no-default-browser-check")
 
@@ -409,7 +419,7 @@ def grab_token_via_launch(
         except Exception as e:
             print(f"❌ Gagal launch: {e}")
             print()
-            print("💡 Coba: python3 z-auth.py --no-profile")
+            print(f"💡 Coba: {get_python_command()} z-auth.py --no-profile")
             return None
 
         context = browser.new_context()
@@ -462,7 +472,7 @@ def show_token():
     token = load_token()
     if not token:
         print("❌ Belum ada token tersimpan.")
-        print("   Jalankan: python3 z-auth.py")
+        print(f"   Jalankan: {get_python_command()} z-auth.py")
         return
 
     data = json.loads(TOKEN_FILE.read_text())
@@ -565,7 +575,7 @@ def main():
             print(f'      google-chrome --remote-debugging-port={DEFAULT_DEBUG_PORT}')
         print()
         print("   B) Launch Chrome baru otomatis:")
-        print("      python3 z-auth.py --launch")
+        print(f"      {get_python_command()} z-auth.py --launch")
         print()
 
         # Auto-launch Chrome with debug port
@@ -576,12 +586,12 @@ def main():
             answer = "y"
 
         if answer in ("", "y", "yes"):
-            user_dir = None if args.no_profile else (args.user_data_dir or get_chrome_user_data_dir())
+            user_dir = None if args.no_profile else (args.user_data_dir or get_default_debug_profile_dir())
             chrome_path = args.chrome_path or get_chrome_executable()
 
-            if launch_chrome_with_debug_port(chrome_path, user_dir, DEFAULT_DEBUG_PORT):
+            if launch_chrome_with_debug_port(chrome_path, user_dir, port):
                 print()
-                token = grab_token_via_cdp(DEFAULT_DEBUG_PORT)
+                token = grab_token_via_cdp(port)
                 if token:
                     _save_and_print_success(token)
                     return
@@ -617,7 +627,7 @@ def main():
         print()
         print("  1. Pastikan Chrome terinstal")
         print("  2. Login ke chat.z.ai di Chrome")
-        print("  3. Coba: python3 z-auth.py --launch")
+        print(f"  3. Coba: {get_python_command()} z-auth.py --launch")
         print()
         print("  Cara terbaik (connect ke Chrome yang sedang buka):")
         if platform.system() == "Windows":
@@ -626,7 +636,7 @@ def main():
             print(f'     open -a "Google Chrome" --args --remote-debugging-port={DEFAULT_DEBUG_PORT}')
         else:
             print(f'     google-chrome --remote-debugging-port={DEFAULT_DEBUG_PORT}')
-        print(f"     python3 z-auth.py")
+        print(f"     {get_python_command()} z-auth.py")
         print()
         sys.exit(1)
 
@@ -658,10 +668,11 @@ def _save_and_print_success(token: str):
     print(f"   📁 Disimpan di: {TOKEN_FILE}")
     if user_info:
         print(f"   👤 User: {user_info.get('name', 'N/A')} ({user_info.get('email', 'N/A')})")
+    python_cmd = get_python_command()
     print()
     print("   Langsung jalankan:")
-    print("   python3 z-chat.py")
-    print('   python3 z-send.py "Halo bro!"')
+    print(f"   {python_cmd} z-chat.py")
+    print(f'   {python_cmd} z-send.py "Halo bro!"')
     print()
 
 

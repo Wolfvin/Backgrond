@@ -4,16 +4,23 @@ Z.ai Config — Kelola token dan konfigurasi
 ============================================
 
 Usage:
-  python3 z-config.py status    # Cek status token
-  python3 z-config.py set       # Set token manual
-  python3 z-config.py clear     # Hapus token
-  python3 z-config.py test      # Test apakah token masih valid
+  python z-config.py status    # Cek status token
+  python z-config.py set       # Set token manual
+  python z-config.py clear     # Hapus token
+  python z-config.py test      # Test apakah token masih valid
+  # Windows: py z-config.py status
 """
 
 import json
 import sys
 import os
+import platform
 from pathlib import Path
+
+
+def get_python_command() -> str:
+    return "py" if platform.system() == "Windows" else "python3"
+
 
 TOKEN_FILE = Path.home() / ".zai-token"
 
@@ -43,8 +50,8 @@ def cmd_status():
         print("❌ Belum ada config.")
         print()
         print("Cara setup:")
-        print("  python3 z-auth.py        # Auto ambil token dari Chrome")
-        print("  python3 z-config.py set  # Set token manual")
+        print(f"  {get_python_command()} z-auth.py        # Auto ambil token dari Chrome")
+        print(f"  {get_python_command()} z-config.py set  # Set token manual")
         return
 
     data = load_config()
@@ -156,7 +163,7 @@ def cmd_test():
             print(f"   ID: {user_info.get('id', 'N/A')}")
             print(f"   IDP: {user_info.get('idp', 'N/A')}")
         elif resp.status_code == 401:
-            print("❌ Token expired/invalid! Jalankan: python3 z-auth.py")
+            print(f"❌ Token expired/invalid! Jalankan: {get_python_command()} z-auth.py")
         else:
             print(f"❌ Error: HTTP {resp.status_code}")
     except Exception as e:

@@ -4,10 +4,11 @@ Z.ai Quick Send — Kirim satu pesan dan langsung dapat response
 ================================================================
 
 Usage:
-  python3 z-send.py "Halo bro, apa kabar?"
-  python3 z-send.py --search "Berita terbaru hari ini"
-  python3 z-send.py --model GLM-5 "Hello"
-  echo "Apa kabar?" | python3 z-send.py -
+  python z-send.py "Halo bro, apa kabar?"
+  python z-send.py --search "Berita terbaru hari ini"
+  python z-send.py --model GLM-5 "Hello"
+  echo "Apa kabar?" | python z-send.py -
+  # Windows: py z-send.py "message"
 """
 
 import requests
@@ -16,9 +17,15 @@ import uuid
 import time
 import sys
 import os
+import platform
 import argparse
 from datetime import datetime
 from pathlib import Path
+
+
+def get_python_command() -> str:
+    return "py" if platform.system() == "Windows" else "python3"
+
 
 TOKEN_FILE = Path.home() / ".zai-token"
 BASE_URL = "https://chat.z.ai"
@@ -167,7 +174,7 @@ def main():
     # Get token
     token = get_token()
     if not token:
-        print("❌ Token tidak ditemukan! Jalankan: python3 z-auth.py", file=sys.stderr)
+        print(f"❌ Token tidak ditemukan! Jalankan: {get_python_command()} z-auth.py", file=sys.stderr)
         sys.exit(1)
 
     send_message(
