@@ -1,6 +1,6 @@
 #!/bin/bash
-# Z.ai CLI Setup Script
-# =====================
+# Z.ai CLI Setup Script (macOS / Linux)
+# =======================================
 
 set -e
 
@@ -26,22 +26,23 @@ echo "🌐 Installing Playwright browsers..."
 python3 -m playwright install chromium
 
 # Make scripts executable
-chmod +x z-auth.py z-chat.py z-send.py z-config.py
+chmod +x z-auth.py z-chat-cdp.py z-config.py
 
 echo ""
 echo "✅ Setup selesai!"
 echo ""
 echo "📋 Langkah selanjutnya:"
 echo ""
-echo "  1. Ambil token:"
+echo "  1. Jalankan Chrome dengan debug port:"
+echo "     google-chrome --remote-debugging-port=9222"
+echo "     (macOS: open -a \"Google Chrome\" --args --remote-debugging-port=9222)"
+echo ""
+echo "  2. Ambil token:"
 echo "     python3 z-auth.py"
 echo ""
-echo "  2. Mulai chat:"
-echo "     python3 z-chat.py"
+echo "  3. Mulai chat:"
+echo "     python3 z-chat-cdp.py"
 echo ""
-echo "  3. Quick send:"
-echo "     python3 z-send.py \"Halo bro!\""
-echo ""
-echo "  4. Cek config:"
-echo "     python3 z-config.py status"
+echo "  4. Quick send:"
+echo "     python3 z-chat-cdp.py \"Halo bro!\""
 echo ""

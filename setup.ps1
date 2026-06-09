@@ -6,7 +6,7 @@ Write-Host ""
 
 # Check Python
 $pythonCmd = $null
-foreach ($cmd in @("python3", "python")) {
+foreach ($cmd in @("py", "python3", "python")) {
     try {
         $version = & $cmd --version 2>&1
         if ($version -match "Python 3") {
@@ -40,15 +40,15 @@ Write-Host "✅ Setup selesai!" -ForegroundColor Green
 Write-Host ""
 Write-Host "📋 Langkah selanjutnya:" -ForegroundColor Cyan
 Write-Host ""
-Write-Host "  1. Ambil token:"
+Write-Host "  1. Jalankan Chrome dengan debug port:"
+Write-Host '     chrome.exe --remote-debugging-port=9222'
+Write-Host ""
+Write-Host "  2. Ambil token:"
 Write-Host "     $pythonCmd z-auth.py"
 Write-Host ""
-Write-Host "  2. Mulai chat:"
-Write-Host "     $pythonCmd z-chat.py"
+Write-Host "  3. Mulai chat:"
+Write-Host "     $pythonCmd z-chat-cdp.py"
 Write-Host ""
-Write-Host "  3. Quick send:"
-Write-Host '     $pythonCmd z-send.py "Halo bro!"'
-Write-Host ""
-Write-Host "  4. Cek config:"
-Write-Host "     $pythonCmd z-config.py status"
+Write-Host "  4. Quick send:"
+Write-Host '     $pythonCmd z-chat-cdp.py "Halo bro!"'
 Write-Host ""
