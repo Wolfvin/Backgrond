@@ -5,19 +5,21 @@ Z.ai Chat via Browser (CDP) — Chat melalui Chrome yang sedang terbuka
 
 Cara kerja:
 1. Connect ke Chrome yang sudah buka Z.ai via CDP
-2. Inject message ke input box Z.ai
-3. Kirim pesan lewat browser (bukan API langsung)
-4. Baca response dari DOM
+2. Intercept SSE stream dari browser (override window.fetch)
+3. Inject message ke input box Z.ai
+4. Capture response dari SSE stream, bukan dari DOM
 
 Keuntungan:
 - Tidak perlu x-signature (browser yang handle)
 - Tidak perlu captcha (browser yang handle)
-- 100% sama seperti chat di browser
+- Response di-capture dari network stream (akurat & real-time)
+- Fallback ke DOM polling kalau SSE intercept gagal
 
 Usage:
   py z-chat-cdp.py                     # Interactive chat via browser
   py z-chat-cdp.py --port 9222         # CDP port khusus
   py z-chat-cdp.py "Halo bro!"         # Quick send via browser
+  py z-chat-cdp.py --debug             # Debug mode (verbose)
   # Windows: py z-chat-cdp.py
 """
 
@@ -30,7 +32,7 @@ import platform
 import urllib.request
 import urllib.error
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List
 
 
 # ============================================================
@@ -94,13 +96,137 @@ def find_any_chrome_debug_port() -> Optional[int]:
 
 
 # ============================================================
+# JavaScript injection snippets
+# ============================================================
+
+JS_SSE_INTERCEPTOR = """
+() => {
+    // Clean up previous interceptor if exists
+    if (window.__zai_original_fetch) {
+        window.fetch = window.__zai_original_fetch;
+    }
+
+    window.__zai_original_fetch = window.fetch;
+    window.__zai_sse_events = [];
+    window.__zai_sse_buffer = '';
+    window.__zai_stream_active = false;
+    window.__zai_stream_done = false;
+    window.__zai_stream_error = null;
+
+    window.fetch = async function(...args) {
+        const response = await window.__zai_original_fetch.apply(this, args);
+        const url = typeof args[0] === 'string' ? args[0] : (args[0]?.url || '');
+
+        if (url.includes('/chat/completions') || url.includes('/chat%2Fcompletions')) {
+            window.__zai_sse_events = [];
+            window.__zai_sse_buffer = '';
+            window.__zai_stream_active = true;
+            window.__zai_stream_done = false;
+            window.__zai_stream_error = null;
+
+            try {
+                const clonedResponse = response.clone();
+                const reader = clonedResponse.body.getReader();
+                const decoder = new TextDecoder();
+
+                (async () => {
+                    try {
+                        while (true) {
+                            const { done, value } = await reader.read();
+                            if (done) {
+                                // Process any remaining buffer
+                                if (window.__zai_sse_buffer.trim()) {
+                                    window.__zai_sse_buffer.split('\\n').forEach(line => {
+                                        if (line.startsWith('data: ')) {
+                                            try {
+                                                const data = JSON.parse(line.substring(6));
+                                                window.__zai_sse_events.push(data);
+                                            } catch (e) {}
+                                        }
+                                    });
+                                }
+                                window.__zai_stream_active = false;
+                                window.__zai_stream_done = true;
+                                break;
+                            }
+                            const text = decoder.decode(value, { stream: true });
+                            window.__zai_sse_buffer += text;
+
+                            // Process complete lines from buffer
+                            const lines = window.__zai_sse_buffer.split('\\n');
+                            window.__zai_sse_buffer = lines.pop(); // Keep incomplete line
+
+                            for (const line of lines) {
+                                if (line.startsWith('data: ')) {
+                                    try {
+                                        const data = JSON.parse(line.substring(6));
+                                        window.__zai_sse_events.push(data);
+                                    } catch (e) {
+                                        // Not valid JSON, skip
+                                    }
+                                }
+                            }
+                        }
+                    } catch (e) {
+                        window.__zai_stream_active = false;
+                        window.__zai_stream_done = true;
+                        window.__zai_stream_error = e.message;
+                    }
+                })();
+            } catch (e) {
+                window.__zai_stream_active = false;
+                window.__zai_stream_done = true;
+                window.__zai_stream_error = 'Clone failed: ' + e.message;
+            }
+        }
+
+        return response;
+    };
+
+    return 'SSE interceptor installed';
+}
+"""
+
+JS_RESET_SSE_STATE = """
+() => {
+    window.__zai_sse_events = [];
+    window.__zai_sse_buffer = '';
+    window.__zai_stream_active = false;
+    window.__zai_stream_done = false;
+    window.__zai_stream_error = null;
+    return 'SSE state reset';
+}
+"""
+
+JS_GET_SSE_STATE = """
+() => {
+    return {
+        events_count: (window.__zai_sse_events || []).length,
+        stream_active: window.__zai_stream_active || false,
+        stream_done: window.__zai_stream_done || false,
+        stream_error: window.__zai_stream_error || null,
+        buffer_length: (window.__zai_sse_buffer || '').length,
+        interceptor_installed: !!window.__zai_original_fetch,
+    };
+}
+"""
+
+JS_GET_SSE_EVENTS = """
+(fromIndex) => {
+    const events = window.__zai_sse_events || [];
+    return events.slice(fromIndex);
+}
+"""
+
+
+# ============================================================
 # Browser Chat via CDP
 # ============================================================
 
 class BrowserChat:
     """Chat via browser yang sudah terbuka (CDP)."""
 
-    def __init__(self, port: int = DEFAULT_DEBUG_PORT):
+    def __init__(self, port: int = DEFAULT_DEBUG_PORT, debug: bool = False):
         try:
             from playwright.sync_api import sync_playwright
         except ImportError:
@@ -109,9 +235,16 @@ class BrowserChat:
             sys.exit(1)
 
         self.port = port
+        self.debug = debug
         self.pw = None
         self.browser = None
         self.page = None
+        self._interceptor_installed = False
+
+    def _log(self, msg: str):
+        """Print debug message."""
+        if self.debug:
+            print(f"  [DEBUG] {msg}")
 
     def connect(self) -> bool:
         """Connect ke Chrome via CDP."""
@@ -138,6 +271,11 @@ class BrowserChat:
 
         # Cari tab Z.ai atau buka baru
         self.page = self._find_or_open_zai()
+
+        if self.page:
+            # Install SSE interceptor
+            self._install_sse_interceptor()
+
         return self.page is not None
 
     def _find_or_open_zai(self):
@@ -161,153 +299,338 @@ class BrowserChat:
         time.sleep(3)
         return page
 
+    def _install_sse_interceptor(self):
+        """Install JavaScript SSE interceptor di page."""
+        try:
+            result = self.page.evaluate(JS_SSE_INTERCEPTOR)
+            self._interceptor_installed = True
+            self._log(f"SSE interceptor: {result}")
+        except Exception as e:
+            self._log(f"Failed to install SSE interceptor: {e}")
+            self._interceptor_installed = False
+
+    def _reset_sse_state(self):
+        """Reset SSE state sebelum kirim pesan baru."""
+        try:
+            self.page.evaluate(JS_RESET_SSE_STATE)
+            self._log("SSE state reset")
+        except Exception as e:
+            self._log(f"Failed to reset SSE state: {e}")
+
+    def _get_sse_state(self) -> dict:
+        """Get current SSE interceptor state."""
+        try:
+            return self.page.evaluate(JS_GET_SSE_STATE)
+        except Exception:
+            return {
+                "events_count": 0,
+                "stream_active": False,
+                "stream_done": False,
+                "stream_error": None,
+                "interceptor_installed": False,
+            }
+
+    def _get_sse_events(self, from_index: int = 0) -> List[dict]:
+        """Get SSE events from given index."""
+        try:
+            return self.page.evaluate(JS_GET_SSE_EVENTS, from_index)
+        except Exception:
+            return []
+
     def send_message(self, message: str) -> str:
         """
         Kirim pesan ke Z.ai melalui browser.
-        Menginject pesan ke input box dan trigger send.
+        Prioritas: Playwright fill() > JS evaluate > typing fallback.
         """
         if not self.page:
             print("❌ Tidak ada koneksi ke browser!")
             return ""
 
+        # Reset SSE state before sending
+        self._reset_sse_state()
+
+        # Try Method 1: Playwright's fill() + Enter (most reliable for React)
         try:
-            # Method 1: Use Z.ai's internal API via page.evaluate
-            # This runs in the browser context, so it uses browser's cookies/sessions/signatures
+            textarea = self.page.locator("textarea").first
+            if textarea:
+                textarea.click()
+                time.sleep(0.1)
+                textarea.fill(message)
+                time.sleep(0.2)
+                textarea.press("Enter")
+                self._log("Message sent via Playwright fill()")
+                return "fill"
+        except Exception as e:
+            self._log(f"fill() failed: {e}")
+
+        # Try Method 2: JS evaluate injection
+        try:
             result = self.page.evaluate(f"""
                 async () => {{
-                    // Try to find the chat input
                     const textarea = document.querySelector('textarea');
                     if (!textarea) {{
-                        return JSON.stringify({{error: 'Input textarea tidak ditemukan!'}});
+                        return JSON.stringify({{error: 'textarea not found'}});
                     }}
 
-                    // Set the value using native input setter
+                    // Set value using native input setter (React compatible)
                     const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
                         window.HTMLTextAreaElement.prototype, 'value'
                     ).set;
                     nativeInputValueSetter.call(textarea, {json.dumps(message)});
 
-                    // Dispatch input event so React picks it up
+                    // Dispatch input event for React
                     textarea.dispatchEvent(new Event('input', {{ bubbles: true }}));
 
-                    // Wait a tiny bit for React to process
+                    // Wait for React to process
                     await new Promise(r => setTimeout(r, 100));
 
-                    // Find and click the send button
-                    const sendButton = document.querySelector('button[aria-label="Send"]')
-                        || document.querySelector('button[type="submit"]')
-                        || document.querySelector('svg.icon-send')?.closest('button')
-                        || document.querySelector('button:has(svg)')?.parentElement;
-
-                    // Alternative: press Enter
+                    // Press Enter via keyboard event
                     textarea.dispatchEvent(new KeyboardEvent('keydown', {{
-                        key: 'Enter',
-                        code: 'Enter',
-                        keyCode: 13,
-                        which: 13,
-                        bubbles: true
+                        key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true
                     }}));
 
-                    return JSON.stringify({{success: true, method: 'enter'}});
+                    return JSON.stringify({{success: true, method: 'js-evaluate'}});
                 }}
             """)
 
             data = json.loads(result)
-
             if data.get("error"):
-                print(f"⚠️  {data['error']}")
-                # Fallback: try typing directly
-                return self._send_via_typing(message)
-
-            return data.get("method", "unknown")
-
+                self._log(f"JS evaluate error: {data['error']}")
+            else:
+                self._log(f"Message sent via JS evaluate: {data.get('method')}")
+                return data.get("method", "js-evaluate")
         except Exception as e:
-            print(f"⚠️  Evaluate error: {e}")
-            return self._send_via_typing(message)
+            self._log(f"JS evaluate failed: {e}")
+
+        # Try Method 3: Type character by character
+        return self._send_via_typing(message)
 
     def _send_via_typing(self, message: str) -> str:
         """Fallback: type message manually ke textarea."""
         try:
-            textarea = self.page.query_selector("textarea")
+            textarea = self.page.locator("textarea").first
             if not textarea:
                 print("❌ Textarea tidak ditemukan!")
                 return ""
 
-            # Click textarea
             textarea.click()
             time.sleep(0.3)
-
-            # Type message
-            textarea.type(message, delay=30)
+            textarea.type(message, delay=20)
             time.sleep(0.3)
-
-            # Press Enter
             textarea.press("Enter")
-
+            self._log("Message sent via typing")
             return "typed"
-
         except Exception as e:
             print(f"❌ Typing error: {e}")
             return ""
 
     def wait_for_response(self, timeout: int = 120) -> str:
         """
-        Tunggu response AI selesai dan extract text dari DOM.
-        Returns the full response text.
+        Tunggu response AI selesai.
+        Primary: SSE stream interception (capture dari network)
+        Fallback: DOM polling (kalau interceptor gagal)
         """
         if not self.page:
             return ""
 
+        # Check if SSE interceptor is installed
+        state = self._get_sse_state()
+        if state.get("interceptor_installed"):
+            self._log("Using SSE stream interception")
+            return self._wait_for_response_sse(timeout)
+        else:
+            self._log("SSE interceptor not available, falling back to DOM polling")
+            return self._wait_for_response_dom(timeout)
+
+    def _wait_for_response_sse(self, timeout: int = 120) -> str:
+        """
+        Wait for AI response via SSE stream interception.
+        Captures the raw SSE data from the browser's fetch response.
+        """
+        full_response = ""
+        thinking_response = ""
+        event_index = 0
+        is_thinking = False
+        no_data_count = 0
+
+        # Wait a moment for the request to be sent
+        time.sleep(0.5)
+
+        for _ in range(timeout * 4):  # Check every 0.25s
+            time.sleep(0.25)
+
+            try:
+                # Get new events from the interceptor
+                new_events = self._get_sse_events(event_index)
+
+                if new_events:
+                    no_data_count = 0
+                    for event in new_events:
+                        event_index += 1
+                        event_type = event.get("type", "")
+
+                        if event_type == "chat:completion":
+                            data = event.get("data", {})
+                            delta = data.get("delta_content", "")
+                            phase = data.get("phase", "")
+
+                            if phase == "thinking":
+                                if not is_thinking:
+                                    is_thinking = True
+                                    print("💭 ", end="", flush=True)
+                                thinking_response += delta
+                            else:
+                                if is_thinking:
+                                    is_thinking = False
+                                    print("\n\n🤖 ", end="", flush=True)
+                                if delta:
+                                    full_response += delta
+                                    print(delta, end="", flush=True)
+
+                        elif event_type == "chat:completion:end" or event_type == "chat:end":
+                            # Stream ended
+                            if is_thinking:
+                                is_thinking = False
+                                print("\n\n🤖 ", end="", flush=True)
+                            self._log("Stream end event received")
+                            # Don't break immediately, there might be more data
+                            time.sleep(0.5)
+                            # Check for any remaining events
+                            remaining = self._get_sse_events(event_index)
+                            for ev in remaining:
+                                event_index += 1
+                                if ev.get("type") == "chat:completion":
+                                    d = ev.get("data", {})
+                                    delta = d.get("delta_content", "")
+                                    if d.get("phase") != "thinking" and delta:
+                                        full_response += delta
+                                        print(delta, end="", flush=True)
+                            break
+
+                        elif event_type == "error":
+                            error_msg = event.get("data", {}).get("message", "Unknown error")
+                            print(f"\n❌ Stream error: {error_msg}")
+                            break
+
+                else:
+                    # No new events
+                    state = self._get_sse_state()
+
+                    if state.get("stream_done") and event_index >= state.get("events_count", 0):
+                        # Stream is done and we've processed all events
+                        self._log("Stream completed (no more events)")
+                        break
+
+                    if not state.get("stream_active"):
+                        no_data_count += 1
+                        if no_data_count > 40:  # 10 seconds with no activity
+                            self._log("No stream activity for 10s, giving up")
+                            break
+
+                    if state.get("stream_error"):
+                        print(f"\n⚠️  Stream error: {state['stream_error']}")
+                        break
+
+            except Exception as e:
+                self._log(f"Error reading SSE events: {e}")
+                continue
+
+        print()  # Newline after response
+        return full_response
+
+    def _wait_for_response_dom(self, timeout: int = 120) -> str:
+        """
+        Fallback: Wait for AI response by polling the DOM.
+        Uses multiple selector strategies to find the assistant message.
+        """
         print("🤖 ", end="", flush=True)
 
-        # Wait for AI response to appear and complete
+        # Record how many assistant messages exist before we look
+        try:
+            initial_count = self.page.evaluate("""
+                () => {
+                    const selectors = [
+                        '[data-message-author-role="assistant"]',
+                        '[data-role="assistant"]',
+                        '.message-assistant',
+                        '.assistant-message',
+                        '.prose',
+                    ];
+                    for (const sel of selectors) {
+                        const els = document.querySelectorAll(sel);
+                        if (els.length > 0) return els.length;
+                    }
+                    return 0;
+                }
+            """)
+        except Exception:
+            initial_count = 0
+
         last_text = ""
         stable_count = 0
 
-        for i in range(timeout * 2):  # Check every 0.5s
+        for _ in range(timeout * 2):  # Check every 0.5s
             time.sleep(0.5)
 
             try:
-                # Extract last assistant message from the page
-                response_text = self.page.evaluate("""
-                    () => {
-                        // Find all message blocks - try multiple selectors
-                        const selectors = [
-                            '.message-assistant',
-                            '[data-role="assistant"]',
-                            '.assistant-message',
-                            '.prose',
-                            '.markdown',
+                response_text = self.page.evaluate(f"""
+                    (initialCount) => {{
+                        // Try multiple selector strategies
+                        const strategies = [
+                            // Strategy 1: Look for data attributes
+                            () => {{
+                                const els = document.querySelectorAll('[data-message-author-role="assistant"]');
+                                if (els.length > initialCount) return els[els.length - 1].innerText;
+                                return null;
+                            }},
+                            // Strategy 2: Look for role-based classes
+                            () => {{
+                                const els = document.querySelectorAll('[data-role="assistant"]');
+                                if (els.length > 0) return els[els.length - 1].innerText;
+                                return null;
+                            }},
+                            // Strategy 3: Look for prose/markdown content (usually AI responses)
+                            () => {{
+                                const els = document.querySelectorAll('.prose');
+                                if (els.length > 0) return els[els.length - 1].innerText;
+                                return null;
+                            }},
+                            // Strategy 4: Look for message containers
+                            () => {{
+                                const els = document.querySelectorAll('.message-assistant, .assistant-message');
+                                if (els.length > 0) return els[els.length - 1].innerText;
+                                return null;
+                            }},
+                            // Strategy 5: Generic - find all message-like elements
+                            () => {{
+                                const messages = document.querySelectorAll('[class*="message"]');
+                                if (messages.length > 1) return messages[messages.length - 1].innerText;
+                                return null;
+                            }},
                         ];
 
-                        for (const sel of selectors) {
-                            const els = document.querySelectorAll(sel);
-                            if (els.length > 0) {
-                                return els[els.length - 1].innerText;
-                            }
-                        }
-
-                        // Fallback: get last message in chat
-                        const messages = document.querySelectorAll('.message, [class*="message"]');
-                        if (messages.length > 0) {
-                            return messages[messages.length - 1].innerText;
-                        }
+                        for (const strategy of strategies) {{
+                            const result = strategy();
+                            if (result && result.length > 5) return result;
+                        }}
 
                         return '';
-                    }
-                """)
+                    }}
+                """, initial_count)
 
                 if response_text and response_text != last_text:
                     # New content arrived
-                    new_content = response_text[len(last_text):]
+                    if last_text:
+                        new_content = response_text[len(last_text):]
+                    else:
+                        new_content = response_text
                     if new_content:
                         print(new_content, end="", flush=True)
                     last_text = response_text
                     stable_count = 0
                 elif response_text and response_text == last_text and len(response_text) > 10:
-                    # Content stable - might be done
                     stable_count += 1
-                    if stable_count >= 4:  # 2 seconds of stable content
+                    if stable_count >= 6:  # 3 seconds of stable content
                         break
 
             except Exception:
@@ -342,6 +665,7 @@ def print_banner():
 ╔══════════════════════════════════════════════╗
 ║    🤖 Z.ai Chat via Browser (CDP)           ║
 ║    Chat melalui Chrome yang sedang terbuka   ║
+║    + SSE Stream Interception                 ║
 ╚══════════════════════════════════════════════╝
     """)
 
@@ -352,8 +676,10 @@ Perintah:
   /help     - Tampilkan bantuan
   /quit     - Keluar
   /url      - Lihat URL halaman saat ini
-  /tab      - Buka tab Z.ai baru
-  /refresh  - Refresh halaman
+  /tab      - Buka/cari tab Z.ai
+  /refresh  - Refresh halaman & reinstall interceptor
+  /debug    - Toggle debug mode
+  /status   - Lihat status SSE interceptor
 
 Atau langsung ketik pesan untuk dikirim!
 """)
@@ -363,6 +689,7 @@ def main():
     parser = argparse.ArgumentParser(description="Z.ai Chat via Browser (CDP)")
     parser.add_argument("message", nargs="?", default=None, help="Quick send (1 pesan)")
     parser.add_argument("--port", type=int, default=DEFAULT_DEBUG_PORT, help="CDP port")
+    parser.add_argument("--debug", action="store_true", help="Debug mode (verbose)")
     args = parser.parse_args()
 
     print_banner()
@@ -388,10 +715,16 @@ def main():
             sys.exit(1)
 
     # Connect
-    chat = BrowserChat(port=port)
+    chat = BrowserChat(port=port, debug=args.debug)
     if not chat.connect():
         sys.exit(1)
 
+    # Show interceptor status
+    state = chat._get_sse_state()
+    if state.get("interceptor_installed"):
+        print("📡 SSE interceptor: ✅ Aktif (response akan di-capture dari network)")
+    else:
+        print("📡 SSE interceptor: ⚠️  Gagal (akan pakai DOM polling sebagai fallback)")
     print()
 
     # Quick send mode
@@ -430,12 +763,32 @@ def main():
                 print("   (Tidak bisa akses page)")
         elif user_input == "/tab":
             chat.page = chat._find_or_open_zai()
+            if chat.page:
+                chat._install_sse_interceptor()
+                state = chat._get_sse_state()
+                if state.get("interceptor_installed"):
+                    print("   📡 SSE interceptor: ✅")
+                else:
+                    print("   📡 SSE interceptor: ⚠️ Fallback ke DOM")
         elif user_input == "/refresh":
             try:
                 chat.page.reload(wait_until="networkidle", timeout=30000)
-                print("✅ Halaman di-refresh!")
+                chat._install_sse_interceptor()
+                print("✅ Halaman di-refresh & interceptor di-reinstall!")
             except Exception as e:
                 print(f"❌ Gagal refresh: {e}")
+        elif user_input == "/debug":
+            chat.debug = not chat.debug
+            print(f"🔧 Debug mode: {'ON' if chat.debug else 'OFF'}")
+        elif user_input == "/status":
+            state = chat._get_sse_state()
+            print(f"📡 SSE Interceptor Status:")
+            print(f"   Installed: {'✅' if state.get('interceptor_installed') else '❌'}")
+            print(f"   Events buffered: {state.get('events_count', 0)}")
+            print(f"   Stream active: {'✅' if state.get('stream_active') else '❌'}")
+            print(f"   Stream done: {'✅' if state.get('stream_done') else '❌'}")
+            if state.get("stream_error"):
+                print(f"   Error: {state['stream_error']}")
         else:
             # Send message via browser
             method = chat.send_message(user_input)
