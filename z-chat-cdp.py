@@ -639,6 +639,75 @@ class BrowserChat:
         print()
         return last_text
 
+    def new_chat(self) -> bool:
+        """Mulai chat baru di Z.ai."""
+        if not self.page:
+            print("❌ Tidak ada koneksi ke browser!")
+            return False
+
+        # Reset SSE state
+        self._reset_sse_state()
+
+        # Strategy 1: Click the "New Chat" button in the sidebar
+        try:
+            clicked = self.page.evaluate("""
+                () => {
+                    // Try multiple selectors for the "New Chat" button
+                    const selectors = [
+                        'a[href="/"]',
+                        'a[href="/c"]',
+                        'button:has(svg)',  // Icon buttons in sidebar
+                    ];
+
+                    // Also try finding by text content
+                    const allLinks = document.querySelectorAll('a, button');
+                    for (const el of allLinks) {
+                        const text = (el.textContent || '').trim().toLowerCase();
+                        if (text === 'new chat' || text === 'new conversation' || text === 'chat baru') {
+                            el.click();
+                            return true;
+                        }
+                    }
+
+                    // Try href-based selectors
+                    for (const sel of selectors) {
+                        const el = document.querySelector(sel);
+                        if (el) {
+                            // Check if it's in the sidebar area
+                            const rect = el.getBoundingClientRect();
+                            if (rect.x < 300) {  // Sidebar is on the left
+                                el.click();
+                                return true;
+                            }
+                        }
+                    }
+
+                    return false;
+                }
+            """)
+
+            if clicked:
+                time.sleep(1.5)
+                # Reinstall interceptor on new page state
+                self._install_sse_interceptor()
+                self._log("New chat via button click")
+                return True
+        except Exception as e:
+            self._log(f"Button click failed: {e}")
+
+        # Strategy 2: Navigate to base URL (forces new chat)
+        try:
+            self.page.goto(ZAI_URL, wait_until="networkidle", timeout=30000)
+            time.sleep(2)
+            self._install_sse_interceptor()
+            self._log("New chat via navigation")
+            return True
+        except Exception as e:
+            self._log(f"Navigation failed: {e}")
+
+        print("❌ Gagal mulai chat baru!")
+        return False
+
     def get_chat_title(self) -> str:
         """Ambil judul chat dari browser tab."""
         try:
@@ -674,6 +743,7 @@ def print_help():
     print("""
 Perintah:
   /help     - Tampilkan bantuan
+  /new      - Mulai chat baru
   /quit     - Keluar
   /url      - Lihat URL halaman saat ini
   /tab      - Buka/cari tab Z.ai
@@ -754,6 +824,11 @@ def main():
         if user_input in ("/quit", "/exit", "/q"):
             print("👋 Bye bro!")
             break
+        elif user_input == "/new":
+            if chat.new_chat():
+                print("💬 Chat baru dimulai!")
+            else:
+                print("❌ Gagal mulai chat baru")
         elif user_input == "/help":
             print_help()
         elif user_input == "/url":
