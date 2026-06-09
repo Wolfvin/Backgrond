@@ -29,11 +29,25 @@ z-ai-cli/
 
 ### 1. Clone & Setup
 
+**Windows (PowerShell):**
+```powershell
+git clone https://github.com/Wolfvin/Backgrond.git
+cd Backgrond
+.\setup.ps1
+```
+
+**macOS / Linux:**
 ```bash
-git clone https://github.com/Wolfvin/z-ai-cli.git
-cd z-ai-cli
+git clone https://github.com/Wolfvin/Backgrond.git
+cd Backgrond
 chmod +x setup.sh
 ./setup.sh
+```
+
+**Manual install (kalau setup gagal):**
+```bash
+pip install playwright requests
+playwright install chromium
 ```
 
 ### 2. Ambil Token (Auto)

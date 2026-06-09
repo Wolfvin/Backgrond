@@ -48,7 +48,7 @@ def get_chrome_user_data_dir() -> Optional[str]:
     # Windows
     windows_paths = [
         home / "AppData" / "Local" / "Google" / "Chrome" / "User Data",
-        home / "AppData" / "Local" / "Google" / "Chrome" / "User Data",
+        Path(os.environ.get("LOCALAPPDATA", "")) / "Google" / "Chrome" / "User Data",
     ]
 
     # macOS
